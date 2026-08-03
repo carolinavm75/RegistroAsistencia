@@ -112,6 +112,26 @@ function claseEstado(estado: EstadoAsistencia) {
   return `status ${estado.toLowerCase()}`;
 }
 
+function claseFilaEstado(estado: EstadoAsistencia) {
+  return `student-row student-row-${estado.toLowerCase()}`;
+}
+
+function textoMetodo(alumno: AlumnoVista) {
+  if (alumno.asistencia_estado === 'Pendiente') {
+    return 'Sin registrar';
+  }
+
+  if (alumno.asistencia_metodo === 'QR') {
+    return 'Registrado por QR';
+  }
+
+  if (alumno.asistencia_metodo === 'Manual') {
+    return 'Registrado manualmente';
+  }
+
+  return 'Registrado';
+}
+
 export default function AsistenciaPage() {
   return (
     <Suspense fallback={<CargandoAsistencia />}>
@@ -478,6 +498,85 @@ function AsistenciaContent() {
     setCodigoLeido('');
   }
 
+  async function registrarAsistenciaCompleta() {
+    if (!materia || !sesion) {
+      setError('No hay sesión activa para registrar asistencia.');
+      return;
+    }
+
+    setError('');
+    setMensaje('');
+
+    const pendientes = alumnosVista.filter(
+      (alumno) => alumno.asistencia_estado === 'Pendiente'
+    );
+
+    if (pendientes.length === 0) {
+      setMensaje('No hay estudiantes pendientes por registrar.');
+      return;
+    }
+
+    const fechaHoraRegistro = new Date().toISOString();
+
+    const registros = pendientes.map((alumno) => ({
+      materia_id: materia.id,
+      fecha: sesion.fecha,
+      hora_inicio: sesion.hora_inicio,
+      alumno_id: alumno.id,
+      estado: 'Presente',
+      metodo: 'Manual',
+      fecha_hora_registro: fechaHoraRegistro,
+    }));
+
+    setRegistrando(true);
+
+    const { error: upsertError } = await supabase.from('asistencias').upsert(
+      registros,
+      {
+        onConflict: 'materia_id,fecha,hora_inicio,alumno_id',
+      }
+    );
+
+    if (upsertError) {
+      setRegistrando(false);
+      setError(
+        `No fue posible registrar la asistencia completa: ${upsertError.message}`
+      );
+      return;
+    }
+
+    const alumnoIds = pendientes.map((alumno) => alumno.id);
+
+    const { error: updateError } = await supabase
+      .from('asistencias')
+      .update({
+        estado: 'Presente',
+        metodo: 'Manual',
+        fecha_hora_registro: fechaHoraRegistro,
+      })
+      .eq('materia_id', materia.id)
+      .eq('fecha', sesion.fecha)
+      .eq('hora_inicio', sesion.hora_inicio)
+      .in('alumno_id', alumnoIds);
+
+    if (updateError) {
+      setRegistrando(false);
+      setError(
+        `No fue posible confirmar la asistencia completa: ${updateError.message}`
+      );
+      return;
+    }
+
+    await cargarDatosAsistencia();
+
+    setRegistrando(false);
+    setMensaje(
+      `Asistencia completa registrada para ${pendientes.length} estudiante${
+        pendientes.length === 1 ? '' : 's'
+      }.`
+    );
+  }
+
   async function registrarAsistencia(
     alumno: Alumno,
     estado: EstadoAsistencia,
@@ -618,6 +717,22 @@ function AsistenciaContent() {
                   {registrando ? 'Registrando...' : 'Registrar'}
                 </button>
               </form>
+
+              <div className="quick-actions">
+                <button
+                  type="button"
+                  className="complete-button"
+                  onClick={registrarAsistenciaCompleta}
+                  disabled={registrando || cargando || resumen.pendiente === 0}
+                >
+                  Asistencia completa
+                </button>
+
+                <p>
+                  Marca como presentes a todos los estudiantes que todavía están
+                  pendientes.
+                </p>
+              </div>
             </section>
 
             <section className="summary-grid">
@@ -693,12 +808,19 @@ function AsistenciaContent() {
 
               <div className="student-list">
                 {alumnosFiltrados.map((alumno) => (
-                  <article key={alumno.id} className="student-row">
-                    <div className="student-heading">
+                  <article
+                    key={alumno.id}
+                    className={claseFilaEstado(alumno.asistencia_estado)}
+                  >
+                    <div className="student-status-bar">
                       <span className={claseEstado(alumno.asistencia_estado)}>
                         {alumno.asistencia_estado}
                       </span>
 
+                      <small>{textoMetodo(alumno)}</small>
+                    </div>
+
+                    <div className="student-heading">
                       <strong>{alumno.nombre}</strong>
                     </div>
 
@@ -966,6 +1088,36 @@ const estilos = `
     cursor: not-allowed;
   }
 
+  .quick-actions {
+    margin-top: 14px;
+    padding-top: 14px;
+    border-top: 1px solid #e5e7eb;
+  }
+
+  .complete-button {
+    width: 100%;
+    min-height: 48px;
+    border: none;
+    border-radius: 14px;
+    background: #111111;
+    color: #ffffff;
+    font-size: 14px;
+    font-weight: 900;
+    cursor: pointer;
+  }
+
+  .complete-button:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+  }
+
+  .quick-actions p {
+    margin: 8px 0 0;
+    color: #666666;
+    font-size: 12px;
+    line-height: 1.4;
+  }
+
   .summary-grid {
     display: grid;
     grid-template-columns: repeat(4, 1fr);
@@ -1052,66 +1204,105 @@ const estilos = `
   .student-list {
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 12px;
     margin-top: 14px;
   }
 
   .student-row {
-    border: 1px solid #e5e7eb;
-    border-radius: 15px;
-    background: #fafafa;
-    padding: 10px;
+    position: relative;
+    border-radius: 18px;
+    padding: 13px 12px 12px;
+    border: 2px solid #e5e7eb;
+    border-left-width: 9px;
+    box-shadow: 0 10px 24px rgba(17, 17, 17, 0.08);
   }
 
-  .student-heading {
-    display: grid;
-    grid-template-columns: auto 1fr;
-    gap: 8px;
+  .student-row-pendiente {
+    background: #fffbeb;
+    border-color: #f59e0b;
+  }
+
+  .student-row-presente {
+    background: #f0fdf4;
+    border-color: #16a34a;
+  }
+
+  .student-row-tarde {
+    background: #fff7ed;
+    border-color: #f97316;
+  }
+
+  .student-row-ausente {
+    background: #fef2f2;
+    border-color: #dc2626;
+  }
+
+  .student-row-justificado {
+    background: #eff6ff;
+    border-color: #2563eb;
+  }
+
+  .student-status-bar {
+    display: flex;
+    justify-content: space-between;
     align-items: center;
+    gap: 8px;
     margin-bottom: 9px;
   }
 
+  .student-status-bar small {
+    color: #444444;
+    font-size: 10px;
+    font-weight: 900;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+  }
+
+  .student-heading {
+    margin-bottom: 11px;
+  }
+
   .student-heading strong {
+    display: block;
     color: #111111;
-    font-size: 13px;
+    font-size: 15px;
     line-height: 1.2;
     font-weight: 900;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
   }
 
   .status {
     border-radius: 999px;
-    padding: 6px 8px;
+    padding: 7px 10px;
     font-size: 10px;
     font-weight: 900;
     white-space: nowrap;
+    text-transform: uppercase;
+    letter-spacing: 0.35px;
   }
 
   .status.presente {
-    background: #dcfce7;
-    color: #166534;
+    background: #16a34a;
+    color: #ffffff;
   }
 
   .status.tarde {
-    background: #fef3c7;
-    color: #92400e;
+    background: #f97316;
+    color: #ffffff;
   }
 
   .status.ausente {
-    background: #fee2e2;
-    color: #991b1b;
+    background: #dc2626;
+    color: #ffffff;
   }
 
   .status.justificado {
-    background: #dbeafe;
-    color: #1e40af;
+    background: #2563eb;
+    color: #ffffff;
   }
 
   .status.pendiente {
-    background: #eeeeee;
-    color: #444444;
+    background: #f59e0b;
+    color: #111111;
   }
 
   .manual-actions {
@@ -1128,6 +1319,7 @@ const estilos = `
     font-weight: 900;
     cursor: pointer;
     padding: 0 6px;
+    box-shadow: 0 4px 10px rgba(17, 17, 17, 0.08);
   }
 
   .manual-button:disabled {
